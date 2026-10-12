@@ -30,6 +30,7 @@ import {
 } from '@genoffice/pptx-engine'
 import { buildRenderSlide, EMU_PER_PX_96, type FontMetricsProvider } from '@genoffice/pptx-render'
 import { coverCropFractions } from '../shared/cover-crop'
+import { MAX_PATH_D_CHARS, svgDToPathLst } from './free-path'
 import { ICON_PATH_LST } from './icon-registry.generated'
 
 export const SPEC_CANVAS_W = 1280
@@ -37,6 +38,7 @@ export const SPEC_CANVAS_H = 720
 
 const MAX_ELEMENTS = 48
 const MAX_IMAGES = 8
+const MAX_PATHS = 4
 const MAX_TEXT_LEN = 4000
 
 /** Preset geometries the spec may use; unknown kinds fall back to rect instead of emitting invalid prst XML. */
@@ -187,6 +189,20 @@ export interface SpecIcon extends SpecBase {
   color?: string
 }
 
+/**
+ * Free vector path: the LLM writes an SVG path `d`, converted at parse time
+ * into an OOXML custGeom pathLst. PowerPoint stretches the path's normalized
+ * bounding box onto the element box (aspect not preserved).
+ */
+export interface SpecPath extends SpecBase {
+  type: 'path'
+  /** Prebuilt <a:pathLst> XML (from d at parse time; d itself is not kept) */
+  pathLst: string
+  fill?: string
+  stroke?: { color: string; widthPt: number }
+  shadow?: SpecShadowTier
+}
+
 export interface SpecTableCell {
   text?: string
   bold?: boolean
@@ -220,7 +236,7 @@ export interface SpecTable extends SpecBase {
   zebra?: string
 }
 
-export type SpecElement = SpecShape | SpecText | SpecImage | SpecChart | SpecIcon | SpecTable
+export type SpecElement = SpecShape | SpecText | SpecImage | SpecChart | SpecIcon | SpecPath | SpecTable
 
 export interface PageSpec {
   background?: string
@@ -441,6 +457,7 @@ export function parsePageSpec(
   const tableProblems: string[] = []
   const inkBoxes: TextInkBox[] = []
   let images = 0
+  let paths = 0
 
   const parseParagraphs = (v: unknown): SpecParagraph[] => {
     if (!Array.isArray(v)) return []
@@ -703,6 +720,52 @@ export function parsePageSpec(
         icon: name,
         color: normColor(el.color) ?? ICON_DEFAULT_COLOR,
         ...base,
+      })
+      continue
+    }
+
+    if (type === 'path') {
+      if (paths >= MAX_PATHS) {
+        warnings.push(`element ${i}: path cap ${MAX_PATHS} reached, dropped`)
+        continue
+      }
+      const d = typeof el.d === 'string' ? el.d.trim() : ''
+      if (!d || d.length > MAX_PATH_D_CHARS) {
+        warnings.push(`element ${i}: path d missing or over ${MAX_PATH_D_CHARS} chars, dropped`)
+        continue
+      }
+      const fillRule = el.fillRule === 'evenodd' ? 'evenodd' : 'nonzero'
+      if (el.fillRule !== undefined && el.fillRule !== 'evenodd' && el.fillRule !== 'nonzero') {
+        warnings.push(`element ${i}: fillRule must be nonzero|evenodd, using nonzero`)
+      }
+      const fill = normColor(el.fill)
+      const strokeRec = asRecord(el.stroke)
+      const strokeColor = normColor(strokeRec.color)
+      const strokeWidth = num(strokeRec.widthPt)
+      const stroke = strokeColor
+        ? { color: strokeColor, widthPt: Math.min(Math.max(strokeWidth ?? 1, 0.25), 24) }
+        : undefined
+      const shadow = parseShadowTier(el.shadow)
+      if (el.shadow !== undefined && !shadow) {
+        warnings.push(`element ${i}: shadow must be soft|medium|strong, ignored`)
+      }
+      if (!fill && !stroke) {
+        warnings.push(`element ${i}: path without fill or stroke, dropped`)
+        continue
+      }
+      const pathLst = svgDToPathLst(d, fillRule)
+      if (!pathLst) {
+        warnings.push(`element ${i}: path d invalid or too complex, dropped`)
+        continue
+      }
+      paths += 1
+      elements.push({
+        type: 'path',
+        pathLst,
+        ...base,
+        ...(fill ? { fill } : {}),
+        ...(stroke ? { stroke } : {}),
+        ...(shadow ? { shadow } : {}),
       })
       continue
     }
@@ -1149,6 +1212,26 @@ export async function buildPagePptx(
         custGeomPathLst: ICON_PATH_LST[el.icon]!,
         fillColor: el.color,
       })
+      continue
+    }
+    if (el.type === 'path') {
+      const added = addElement(slide, {
+        kind: 'shape',
+        offset,
+        name: 'Path',
+        custGeomPathLst: el.pathLst,
+        // 无 fill 时用全透明占位：custGeom 形状不写 solidFill 会继承主题蓝底
+        fillColor: el.fill ?? '#00000000',
+        ...(el.stroke
+          ? {
+              stroke: {
+                color: el.stroke.color,
+                widthEmu: Math.round(el.stroke.widthPt * EMU_PER_PT),
+              },
+            }
+          : {}),
+      })
+      if (el.shadow) applyShadow(added.id, el.shadow)
       continue
     }
     if (el.type === 'table') {

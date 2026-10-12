@@ -39,6 +39,8 @@ export interface NewElementBodyPr {
 
 export interface NewElementOptions {
   kind: NewShapeKind
+  /** Element name suffix for PowerPoint's selection pane ("Path 12"); default Icon/TextBox/Shape */
+  name?: string
   offset: EmuRect
   paragraphs?: Paragraph[]
   /** Solid shape fill (#RRGGBB, or #RRGGBBAA for translucency); textbox has no fill by default */
@@ -147,11 +149,13 @@ export function nextCNvPrId(slide: Slide): number {
 export function buildSpXml(slide: Slide, opts: NewElementOptions): string {
   const id = nextCNvPrId(slide)
   const isTextbox = opts.kind === 'textbox'
-  const name = opts.custGeomPathLst
-    ? `Icon ${id}`
-    : isTextbox
-      ? `TextBox ${id}`
-      : `Shape ${id}`
+  const name = opts.name
+    ? `${opts.name} ${id}`
+    : opts.custGeomPathLst
+      ? `Icon ${id}`
+      : isTextbox
+        ? `TextBox ${id}`
+        : `Shape ${id}`
   const o = opts.offset
   const xfrm = `<a:xfrm><a:off x="${o.x}" y="${o.y}"/><a:ext cx="${o.cx}" cy="${o.cy}"/></a:xfrm>`
   // Parser convention: has txBody and no prstGeom → 'text'; textbox omits prstGeom

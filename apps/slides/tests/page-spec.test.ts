@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest'
 import { openPptx, type TextElement, type PictureElement } from '@genoffice/pptx-engine'
 import { HeuristicMetrics } from '@genoffice/pptx-render'
-import { parsePageSpec, buildPagePptx, type PageSpec } from '../src/main/page-spec'
+import { parsePageSpec, buildPagePptx, type PageSpec, type SpecPath } from '../src/main/page-spec'
 
 // 1x1 red PNG
 const PNG_1PX = Uint8Array.from(
@@ -729,5 +729,97 @@ describe('card text cluster centering', () => {
     expect(balanced!.y).toBe(200) // 均衡卡不动
     const imageCardText = r.spec.elements[4]!
     expect(imageCardText!.y).toBe(366) // 图文混排卡不处理
+  })
+})
+
+describe('PageSpec free paths', () => {
+  const noImages = { fetchImage: async () => null }
+  const pathEls = (r: { ok: boolean; spec?: PageSpec }) =>
+    (r.spec?.elements ?? []).filter((e): e is SpecPath => e.type === 'path')
+
+  it('normalizes d into a bounded pathLst and honors fillRule', () => {
+    const r = parsePageSpec(
+      JSON.stringify({
+        elements: [
+          { type: 'path', x: 0, y: 0, w: 640, h: 120, d: 'M0,0 L100,0 L100,50 Z', fill: '#0EA5E9' },
+          {
+            type: 'path', x: 0, y: 200, w: 640, h: 120,
+            d: 'M0,0 L100,0 L100,50 Z', fill: '#0EA5E9', fillRule: 'evenodd',
+          },
+          {
+            type: 'path', x: 0, y: 400, w: 640, h: 120,
+            d: 'm10 10 h 80 v 40 q 10 10 20 0 a 5 5 0 0 1 -10 0 z', fill: '#111111',
+            fillRule: 'bogus',
+          },
+        ],
+      }),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const els = pathEls(r)
+    expect(els).toHaveLength(3)
+    expect(els[0]!.pathLst.startsWith('<a:pathLst><a:path w="216000" h="108000" fill="norm">')).toBe(true)
+    expect(els[0]!.pathLst).toContain('<a:moveTo>')
+    expect(els[1]!.pathLst).toContain('fill="evenOdd"')
+    // 相对命令/H/V 归一为 lnTo，q→quadBezTo，a→cubicBezTo
+    expect(els[2]!.pathLst).toContain('fill="norm"')
+    expect(els[2]!.pathLst).toContain('<a:lnTo>')
+    expect(els[2]!.pathLst).toContain('<a:quadBezTo>')
+    expect(els[2]!.pathLst).toContain('<a:cubicBezTo>')
+    expect(r.warnings.some((w) => w.includes('fillRule must be nonzero|evenodd'))).toBe(true)
+  })
+
+  it('drops invalid, oversize, unstyled and over-cap paths with warnings', () => {
+    const fivePaths = Array.from({ length: 5 }, (_, i) => ({
+      type: 'path', x: 0, y: i * 100, w: 100, h: 50, d: 'M0,0 L10,0 L10,10 Z', fill: '#111111',
+    }))
+    const r = parsePageSpec(
+      JSON.stringify({
+        elements: [
+          { type: 'path', x: 0, y: 0, w: 100, h: 50, d: 'garbage(((', fill: '#111111' },
+          { type: 'path', x: 0, y: 100, w: 100, h: 50, d: 'M0,0 L10,0' },
+          { type: 'path', x: 0, y: 200, w: 100, h: 50, d: 'M0,0 L1,1'.padEnd(2100, ' 1'), fill: '#111111' },
+          ...fivePaths,
+        ],
+      }),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(pathEls(r)).toHaveLength(4)
+    expect(r.warnings.some((w) => w.includes('path d invalid or too complex'))).toBe(true)
+    expect(r.warnings.some((w) => w.includes('path without fill or stroke'))).toBe(true)
+    expect(r.warnings.some((w) => w.includes('over 2000 chars'))).toBe(true)
+    expect(r.warnings.some((w) => w.includes('path cap 4 reached'))).toBe(true)
+  })
+
+  it('builds custGeom path shapes with transparent fill fallback and strokes', async () => {
+    const r = parsePageSpec(
+      JSON.stringify({
+        elements: [
+          {
+            type: 'path', x: 0, y: 620, w: 1280, h: 100, fill: '#0EA5E9', shadow: 'soft',
+            d: 'M0,80 C200,20 400,120 640,60 S1000,100 1280,40 L1280,100 L0,100 Z',
+          },
+          {
+            type: 'path', x: 100, y: 100, w: 400, h: 10,
+            d: 'M0,5 C120,-5 240,15 400,5',
+            stroke: { color: '#0F172A', widthPt: 2 },
+          },
+        ],
+      }),
+    )
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    const { bytes } = await buildPagePptx(r.spec, noImages)
+    const opened = await openPptx(bytes)
+    const slide = opened.deck.slides[0]!
+    const xml = slide.elements.map((e) => e.anchor.originalXml).join('')
+    expect(xml).toContain('<a:custGeom')
+    expect(xml).toContain('<a:cubicBezTo>')
+    expect(xml).toContain('<a:srgbClr val="0EA5E9"/>')
+    expect(xml).toContain('<a:outerShdw')
+    expect(xml).toContain('<a:alpha val="0"/>')
+    expect(xml).toContain('<a:ln w="25400"')
+    expect(xml).toContain('Path ')
   })
 })
