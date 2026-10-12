@@ -285,6 +285,27 @@ describe('buildPagePptx text-box height fix', () => {
     expect(shape.transform.offset.cy).toBe(30 * EMU_PER_PX)
   })
 
+  it('shrinks a grossly oversized top-anchored box to the measured content height', async () => {
+    const { bytes } = await buildPagePptx({ elements: [bigTitle({ h: 250 })] }, deps)
+    const opened = await openPptx(bytes)
+    const el = opened.deck.slides[0]!.elements.find((e): e is TextElement => e.type === 'text')!
+    // One 40pt line ≈64px: 250px declared is grossly oversized → hugs the content
+    expect(px(el.transform.offset.cy)).toBeCloseTo(oneLinePx, 0)
+    // Top anchor: glyphs stay, the box only loses its empty tail
+    expect(el.transform.offset.y).toBe(100 * EMU_PER_PX)
+  })
+
+  it('compensates a middle-anchored shrink so the rendered glyphs stay in place', async () => {
+    const { bytes } = await buildPagePptx(
+      { elements: [bigTitle({ h: 250, valign: 'middle' })] },
+      deps,
+    )
+    const opened = await openPptx(bytes)
+    const el = opened.deck.slides[0]!.elements.find((e): e is TextElement => e.type === 'text')!
+    expect(px(el.transform.offset.cy)).toBeCloseTo(oneLinePx, 0)
+    expect(px(el.transform.offset.y)).toBeCloseTo(100 + (250 - oneLinePx) / 2, 0)
+  })
+
   it('skips the fix entirely when no font metrics are injected', async () => {
     const { bytes } = await buildPagePptx(
       { elements: [bigTitle()] },

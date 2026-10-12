@@ -964,6 +964,13 @@ export interface BuildPageDeps {
 const TABLE_OVERFLOW_TOL_PX = 4
 /** Tolerance before grown text counts as running off the slide bottom. */
 const CANVAS_BOTTOM_TOL_PX = 2
+/** Waste before a declared text box counts as grossly oversized and hugs its content. */
+const SHRINK_MIN_WASTE_PX = 32
+/**
+ * Moderate padding (a 100px box around 64px of text) is design intent and stays;
+ * only boxes whose waste exceeds this ratio of the content shrink.
+ */
+const SHRINK_WASTE_RATIO = 0.6
 
 function firstCellText(el: TableElement): string {
   for (const row of el.rows) {
@@ -981,8 +988,11 @@ function firstCellText(el: TableElement): string {
  * past the selection frame (and PowerPoint past the shape). Re-measure every text box
  * with the real layout engine — on the reopened (parsed) model, the exact input the
  * landed page will render from — and grow too-short boxes to their content height.
- * Grow-only, plain text boxes only (shape label boxes are design intent); middle/bottom
- * anchored boxes shift up so the rendered glyphs stay exactly where they were.
+ * Plain text boxes only (shape label boxes are design intent); middle/bottom
+ * anchored boxes shift so the rendered glyphs stay exactly where they were.
+ * The same pass shrinks grossly oversized boxes (waste beyond SHRINK_MIN_WASTE_PX
+ * and SHRINK_WASTE_RATIO) down to the measured content — moderate padding is
+ * design intent and stays.
  *
  * The same render pass measures tables: rows whose wrapped cells need more height than
  * declared grow at render time (PowerPoint semantics), spilling the table over
@@ -1032,21 +1042,37 @@ async function growTextBoxesAndValidate(
     const t = node.text
     const needH = Math.max(t.contentHeight, t.inkBottom ?? 0) + t.insets.t + t.insets.b
     const growPx = needH - node.box.h
-    if (growPx < 0.5) continue
-    const tel = el as TextElement
-    const offset = { ...tel.transform.offset, cy: Math.max(1, Math.round(needH * EMU_PER_PX_96)) }
-    if (t.anchor === 'middle') offset.y -= Math.round((growPx / 2) * EMU_PER_PX_96)
-    else if (t.anchor === 'bottom') offset.y -= Math.round(growPx * EMU_PER_PX_96)
-    tel.transform = { ...tel.transform, offset }
-    tel.dirtyTransform = true
-    changed = true
-    const bottomPx = (offset.y + offset.cy) / EMU_PER_PX_96
-    if (bottomPx > slideHpx + CANVAS_BOTTOM_TOL_PX) {
-      const label =
-        t.lines.flatMap((l) => l.runs.map((r) => r.text)).join('').trim().slice(0, 20) || 'text'
-      problems.push(
-        `element ${slide.elements.indexOf(el)} ("${label}"): text grows to ${Math.round(bottomPx)}px, past the ${Math.round(slideHpx)}px canvas — shorten the text, drop the font size, or move the box up`,
-      )
+    if (growPx >= 0.5) {
+      const tel = el as TextElement
+      const offset = { ...tel.transform.offset, cy: Math.max(1, Math.round(needH * EMU_PER_PX_96)) }
+      if (t.anchor === 'middle') offset.y -= Math.round((growPx / 2) * EMU_PER_PX_96)
+      else if (t.anchor === 'bottom') offset.y -= Math.round(growPx * EMU_PER_PX_96)
+      tel.transform = { ...tel.transform, offset }
+      tel.dirtyTransform = true
+      changed = true
+      const bottomPx = (offset.y + offset.cy) / EMU_PER_PX_96
+      if (bottomPx > slideHpx + CANVAS_BOTTOM_TOL_PX) {
+        const label =
+          t.lines.flatMap((l) => l.runs.map((r) => r.text)).join('').trim().slice(0, 20) || 'text'
+        problems.push(
+          `element ${slide.elements.indexOf(el)} ("${label}"): text grows to ${Math.round(bottomPx)}px, past the ${Math.round(slideHpx)}px canvas — shorten the text, drop the font size, or move the box up`,
+        )
+      }
+      continue
+    }
+    // Grossly oversized box (the model budgeted several lines but wrote one):
+    // shrink to the measured content so the frame stops tripping overlap checks
+    // against neighbors and stops reading as empty space in the editor. Anchor
+    // compensation mirrors the grow branch — glyphs stay exactly where they were.
+    const shrinkPx = node.box.h - needH
+    if (shrinkPx > Math.max(SHRINK_MIN_WASTE_PX, needH * SHRINK_WASTE_RATIO)) {
+      const tel = el as TextElement
+      const offset = { ...tel.transform.offset, cy: Math.max(1, Math.round(needH * EMU_PER_PX_96)) }
+      if (t.anchor === 'middle') offset.y += Math.round((shrinkPx / 2) * EMU_PER_PX_96)
+      else if (t.anchor === 'bottom') offset.y += Math.round(shrinkPx * EMU_PER_PX_96)
+      tel.transform = { ...tel.transform, offset }
+      tel.dirtyTransform = true
+      changed = true
     }
   }
   if (problems.length > 0) throw new Error(`page rejected — ${problems.join('; ')}`)
