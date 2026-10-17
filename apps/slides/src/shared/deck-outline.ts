@@ -37,6 +37,9 @@ export interface DeckNodeInfo {
   groupId?: string
   /** master/layout decoration: read-only, not modifiable */
   locked?: boolean
+  /** DeckGen B-100: table dims (rows=N cols=M) for AI addressing of setTableCell */
+  rows?: number
+  cols?: number
 }
 
 /** Find one node by id in the node tree (including groups). */
@@ -167,6 +170,14 @@ export function collectNodeInfos(
       ...(parent?.topLevel ? { groupId: parent.id } : {}),
       ...(n.decoration ? { locked: true } : {}),
       ...nodeColors(n),
+      // DeckGen B-100：表格行列数（rows=N cols=M）——清单读者（AI）靠它定位
+      // setTableCell 行列，不再从被截断的文字摘要里猜。
+      ...(n.type === 'table'
+        ? {
+            rows: new Set((n as TableRenderNode).cells.map((c) => c.y)).size,
+            cols: new Set((n as TableRenderNode).cells.map((c) => c.x)).size,
+          }
+        : {}),
     }
     const fontPt = nodeMaxFontPt(n)
     if (fontPt !== undefined) base.fontSizePt = fontPt
@@ -202,6 +213,12 @@ function pushPageLines(lines: string[], slide: RenderSlide, i: number): void {
     .map(([c, count]) => (count > 1 ? `${c}×${count}` : c))
   if (mainFills.length > 0) lines.push(`  main fills: ${mainFills.join(' ')}`)
   for (const n of infos) {
+    // DeckGen B-100：表格行输出行列数（rows=N cols=M，与 type 同 token）——行列数
+    // 在 collectNodeInfos 从原始 cells 算好放进 info，AI 直接照读不再猜。
+    if (n.rows !== undefined && n.cols !== undefined) {
+      lines.push(`  - ${n.id} | ${n.type}(rows=${n.rows},cols=${n.cols})${n.text ? ` | "${preview(n.text)}"` : ''}`)
+      continue
+    }
     lines.push(`  - ${n.id} | ${n.type}${n.text ? ` | "${preview(n.text)}"` : ''}`)
   }
 }
